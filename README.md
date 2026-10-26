@@ -28,7 +28,7 @@ the boot ROM would leave them in.
 2. Put a FAT32 microSD card in the Sprig's screen board. PicoGB keeps everything in a `PicoGB`
    folder and leaves the rest of the card alone.
 3. Add games: either copy `.gb` / `.gbc` files into `PicoGB/games/` on the card, or double-click
-   **`PicoGB Loader.bat`**, open the page in Chrome or Edge, click **Connect Sprig** and drop
+   **`PicoGB Loader.bat`**, open the page in Chrome or Edge, click **Connect** and drop
    files onto it.
 4. Pick a game on the Sprig.
 

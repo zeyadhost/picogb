@@ -1,368 +1,177 @@
 <!doctype html>
 <html lang="en">
-<head>
 <meta charset="utf-8">
-<title>PicoGB Loader</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PicoGB Loader</title>
 <style>
-  :root {
-    --bg: #0e141c; --panel: #16212d; --line: #24384a; --text: #e8f0f0; --dim: #8494a4;
-    --accent: #60d080; --warn: #f06050; --head: #f0c850; --sel: #2c5a84;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, "Segoe UI", sans-serif; }
-  header { display: flex; align-items: center; gap: 16px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
-  header h1 { margin: 0; font-size: 18px; color: var(--head); letter-spacing: .5px; }
-  #status { color: var(--dim); flex: 1; }
-  #status.ok { color: var(--accent); }
-  #status.err { color: var(--warn); }
-  button { background: var(--sel); color: var(--text); border: 0; border-radius: 6px; padding: 7px 14px;
-           font: inherit; cursor: pointer; }
-  button:hover:not(:disabled) { filter: brightness(1.2); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.ghost { background: transparent; border: 1px solid var(--line); }
-  button.danger { background: transparent; color: var(--warn); border: 1px solid #5a2a2a; }
-  main { display: grid; grid-template-columns: auto 1fr; gap: 22px; padding: 22px; align-items: start; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
-  #screen-card { display: flex; flex-direction: column; gap: 10px; }
-  canvas { width: 480px; height: 432px; image-rendering: pixelated; background: #000; border-radius: 4px; display: block; }
-  #stats { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; display: flex; justify-content: space-between; }
-  .keys { color: var(--dim); font-size: 12px; }
-  kbd { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font-size: 11px; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  h2 { margin: 0 0 10px; font-size: 14px; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .6px; }
-  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 22px; text-align: center; color: var(--dim);
-          cursor: pointer; transition: border-color .15s; }
-  #drop.over { border-color: var(--accent); color: var(--text); }
-  #progress { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 10px; display: none; }
-  #progress div { height: 100%; width: 0; background: var(--accent); transition: width .1s; }
-  #upmsg { margin-top: 8px; min-height: 20px; color: var(--dim); }
+  :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+  body { max-width: 1000px; margin: 0 auto; padding: 12px 20px; }
+  header { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid #8886; }
+  h1 { margin: 0; font-size: 1.2rem; }
+  h2 { margin: 20px 0 6px; font-size: 1rem; }
+  h2:first-child { margin-top: 0; }
+  #status { flex: 1; }
+  .dim { color: GrayText; }
+  .err { color: #d33; }
+  main { display: flex; flex-wrap: wrap; gap: 28px; margin-top: 18px; }
+  main > section { flex: 1; min-width: 300px; }
+  main > div { width: 480px; max-width: 100%; }
+  canvas { display: block; width: 100%; aspect-ratio: 10 / 9; background: #000; image-rendering: pixelated; }
   table { width: 100%; border-collapse: collapse; }
-  td { padding: 7px 6px; border-top: 1px solid var(--line); }
-  td.size { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  td.act { text-align: right; white-space: nowrap; }
-  tr.playing td.name { color: var(--accent); }
-  .badge { font-size: 11px; color: var(--head); border: 1px solid #5a4a20; border-radius: 4px; padding: 0 5px; margin-left: 6px; }
-  #empty { color: var(--dim); padding: 8px 0; }
-  .side { display: flex; flex-direction: column; gap: 22px; min-width: 360px; max-width: 640px; }
-  #unsupported { display: none; margin: 22px; padding: 16px; border: 1px solid var(--warn); border-radius: 10px; }
-  @media (max-width: 960px) {
-    main { grid-template-columns: 1fr; }
-    .side { min-width: 0; max-width: none; }
-    canvas { width: 100%; max-width: 480px; height: auto; aspect-ratio: 160 / 144; }
-  }
+  td { padding: 5px 0; border-bottom: 1px solid #8884; }
+  td + td { padding-left: 12px; }
+  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.playing td:first-child { font-weight: 600; }
+  #drop { display: block; padding: 18px; border: 1px dashed GrayText; text-align: center; cursor: pointer; }
+  #drop.over { border-style: solid; }
+  progress { width: 100%; }
+  kbd { font: .85em ui-monospace, monospace; }
 </style>
-</head>
-<body>
+
 <header>
   <h1>PicoGB</h1>
-  <span id="status">Not connected</span>
-  <button id="connect">Connect Sprig</button>
+  <span id="status" class="dim">Not connected</span>
+  <button id="connect">Connect</button>
 </header>
-<div id="unsupported">This browser can't talk to USB serial devices. Open this page in <b>Chrome</b> or <b>Edge</b>.</div>
+<p id="nosupport" class="err" hidden>This browser has no Web Serial. Open this page in Chrome or Edge.</p>
+
 <main>
-  <div class="card" id="screen-card">
+  <div>
     <canvas id="screen" width="160" height="144"></canvas>
-    <div id="stats"><span id="st-left">—</span><span id="st-right"></span></div>
-    <div class="row">
-      <button id="quit" class="ghost" disabled title="Ctrl+Shift+4">Quit to menu</button>
-      <select id="palette" disabled>
-        <option value="0">Green</option><option value="1">Gray</option>
-        <option value="2">Sunset</option><option value="3">Ice</option>
+    <p id="stats" class="dim">&nbsp;</p>
+    <p>
+      <button id="quit" disabled>Quit to menu</button>
+      <select id="tint" disabled title="Colours for original Game Boy games">
+        <option hidden selected>Colours</option>
       </select>
-    </div>
-    <div class="keys">
-      <kbd>←↑↓→</kbd>/<kbd>WASD</kbd> D-pad &nbsp; <kbd>X</kbd> A &nbsp; <kbd>Z</kbd> B &nbsp;
-      <kbd>Enter</kbd> Start &nbsp; <kbd>Backspace</kbd> Select &nbsp; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>4</kbd> unload game
-    </div>
+    </p>
+    <p class="dim">
+      <kbd>WASD</kbd> or arrows: D-pad. <kbd>X</kbd>: A. <kbd>Z</kbd>: B.
+      <kbd>Enter</kbd>: Start. <kbd>Backspace</kbd>: Select. <kbd>Ctrl+Shift+4</kbd>: quit the game.
+    </p>
   </div>
-  <div class="side">
-    <div class="card">
-      <h2>Add games</h2>
-      <div id="drop">Drop <b>.gb</b> files here, or click to choose</div>
-      <input type="file" id="file" accept=".gb,.gbc" multiple hidden>
-      <div id="progress"><div></div></div>
-      <div id="upmsg"></div>
-    </div>
-    <div class="card">
-      <h2>On the Sprig <span id="free" style="float:right;text-transform:none;font-weight:400"></span></h2>
-      <table id="games"></table>
-      <div id="empty">Connect the Sprig to see its games.</div>
-    </div>
-  </div>
+
+  <section>
+    <h2>Games <span id="free" class="dim"></span></h2>
+    <table id="games"></table>
+    <p id="empty" class="dim">Connect the Sprig to see its games.</p>
+
+    <h2>Add games</h2>
+    <label id="drop">Drop .gb or .gbc files here, or click to choose.
+      <input id="file" type="file" accept=".gb,.gbc" multiple hidden>
+    </label>
+    <progress id="progress" hidden></progress>
+    <p id="upload" class="dim"></p>
+  </section>
 </main>
+
 <script>
 "use strict";
-// Packets are "PGC" (to the Sprig) or "PGR" (back), type letter, 16-bit
-// length, payload and a CRC-16 of everything after the magic. Full list of
-// commands in firmware/PicoGB/link.h.
+// The packet format and all commands are described in firmware/PicoGB/link.h.
 const $ = id => document.getElementById(id);
-const CHUNK = 1024;
+const enc = new TextEncoder(), dec = new TextDecoder();
+const TINTS = ["White", "Classic", "Blue", "Red", "Green", "Yellow", "Sunset", "Ice"];  // firmware order
 
-const crcTable = new Uint16Array(256).map((_, i) => {
+const CRC16 = Uint16Array.from({ length: 256 }, (_, i) => {
   let c = i << 8;
-  for (let k = 0; k < 8; k++) c = (c & 0x8000) ? ((c << 1) ^ 0x1021) & 0xFFFF : (c << 1) & 0xFFFF;
+  for (let k = 0; k < 8; k++) c = c & 0x8000 ? c << 1 ^ 0x1021 : c << 1;
   return c;
 });
-function crc16(bytes, crc = 0xFFFF) {
-  for (const b of bytes) crc = ((crc << 8) ^ crcTable[((crc >> 8) ^ b) & 0xFF]) & 0xFFFF;
-  return crc;
-}
-const crc32Table = new Uint32Array(256).map((_, i) => {
+const CRC32 = Uint32Array.from({ length: 256 }, (_, i) => {
   let c = i;
-  for (let k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
-  return c >>> 0;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ c >>> 1 : c >>> 1;
+  return c;
 });
+function crc16(bytes) {
+  let c = 0xFFFF;
+  for (const b of bytes) c = (c << 8 & 0xFFFF) ^ CRC16[c >> 8 ^ b];
+  return c;
+}
 function crc32(bytes) {
-  let c = 0xFFFFFFFF;
-  for (const b of bytes) c = crc32Table[(c ^ b) & 0xFF] ^ (c >>> 8);
-  return (c ^ 0xFFFFFFFF) >>> 0;
+  let c = ~0;
+  for (const b of bytes) c = CRC32[(c ^ b) & 0xFF] ^ c >>> 8;
+  return ~c >>> 0;
+}
+const u32 = v => new Uint8Array([v, v >> 8, v >> 16, v >>> 24]);
+const rd32 = (p, o) => (p[o] | p[o + 1] << 8 | p[o + 2] << 16 | p[o + 3] << 24) >>> 0;
+const kb = n => `${Math.round(n / 1024)} KB`;
+
+function status(text, error = false) {
+  $("status").textContent = text;
+  $("status").className = error ? "err" : "dim";
 }
 
-let port = null, writer = null, rxBuf = new Uint8Array(0), waiting = {}, state = null, games = [];
-const td = new TextDecoder(), te = new TextEncoder();
+// ---- link
 
-function setStatus(text, cls = "") { const s = $("status"); s.textContent = text; s.className = cls; }
+let port = null, writer = null, rx = new Uint8Array(0);
+const waiting = new Map();
 
-async function send(cmd, payload = new Uint8Array(0)) {
-  const body = new Uint8Array(3 + payload.length);
-  body[0] = cmd.charCodeAt(0); body[1] = payload.length & 0xFF; body[2] = payload.length >> 8;
-  body.set(payload, 3);
-  const crc = crc16(body), pkt = new Uint8Array(5 + body.length);
-  pkt.set([0x50, 0x47, 0x43]); pkt.set(body, 3);
-  pkt[3 + body.length] = crc & 0xFF; pkt[4 + body.length] = crc >> 8;
-  await writer.write(pkt);
+function send(cmd, payload = new Uint8Array(0)) {
+  const n = payload.length, pkt = new Uint8Array(8 + n);
+  pkt.set([0x50, 0x47, 0x43, cmd.charCodeAt(0), n & 0xFF, n >> 8]);
+  pkt.set(payload, 6);
+  const crc = crc16(pkt.subarray(3, 6 + n));
+  pkt[6 + n] = crc & 0xFF;
+  pkt[7 + n] = crc >> 8;
+  return writer.write(pkt);
 }
 
-function request(cmd, payload, timeout = 15000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { delete waiting[cmd]; reject(new Error("no reply from the Sprig")); }, timeout);
-    waiting[cmd] = p => { clearTimeout(t); resolve(p); };
+// One request at a time, so two replies of the same type can't get mixed up.
+let queue = Promise.resolve();
+function request(cmd, payload, ms = 15000) {
+  const run = () => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { waiting.delete(cmd); reject(new Error("The Sprig did not reply")); }, ms);
+    waiting.set(cmd, p => { clearTimeout(timer); resolve(p); });
     send(cmd, payload).catch(reject);
   });
+  const result = queue.then(run, run);
+  queue = result.catch(() => {});
+  return result;
 }
 
-function check(p, skip = 0) {
-  if (p[0] !== 0) throw new Error(td.decode(p.subarray(1 + skip)));
+// Most replies start with a status byte. On an error, a message follows
+// after `skip` more bytes.
+function ok(p, skip = 0) {
+  if (p[0] !== 0) throw new Error(dec.decode(p.subarray(1 + skip)) || "The Sprig reported an error");
   return p;
 }
 
-const u32 = (v) => new Uint8Array([v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >>> 24) & 0xFF]);
-const rd32 = (p, o) => (p[o] | p[o + 1] << 8 | p[o + 2] << 16 | p[o + 3] << 24) >>> 0;
-
-function onPacket(type, p) {
-  if (type === "V") return drawFrame(p);
-  const w = waiting[type];
-  if (w) { delete waiting[type]; w(p); }
-}
-
-function feed(chunk) {
-  const b = new Uint8Array(rxBuf.length + chunk.length);
-  b.set(rxBuf); b.set(chunk, rxBuf.length);
+function receive(chunk) {
+  let b = chunk;
+  if (rx.length) { b = new Uint8Array(rx.length + chunk.length); b.set(rx); b.set(chunk, rx.length); }
   let i = 0;
   for (;;) {
     while (i + 3 <= b.length && !(b[i] === 0x50 && b[i + 1] === 0x47 && b[i + 2] === 0x52)) i++;
-    if (b.length - i < 6) break;
+    if (b.length - i < 8) break;
     const n = b[i + 4] | b[i + 5] << 8;
     if (b.length - i < 8 + n) break;
-    const body = b.subarray(i + 3, i + 6 + n), crc = b[i + 6 + n] | b[i + 7 + n] << 8;
-    if (crc16(body) !== crc) { i++; continue; }
-    onPacket(String.fromCharCode(body[0]), body.slice(3));
+    const body = b.subarray(i + 3, i + 6 + n);
+    if (crc16(body) !== (b[i + 6 + n] | b[i + 7 + n] << 8)) { i++; continue; }
+    const type = String.fromCharCode(body[0]), payload = body.subarray(3);
+    if (type === "V") frame(payload);
+    else { waiting.get(type)?.(payload); waiting.delete(type); }
     i += 8 + n;
   }
-  rxBuf = b.slice(i);
+  rx = b.slice(i);
 }
 
-// Screen mirror
-const ctx = $("screen").getContext("2d");
-const img = ctx.createImageData(160, 144);
-let frames = 0, fpsAt = performance.now(), fps = 0, lastKind = -1;
-
-function drawFrame(p) {
-  const kind = p[0], emuUs = p[2] | p[3] << 8;
-  // Game Boy Color frames come in two halves: 64 RGB565 colours, the first
-  // row number, then one byte per pixel.
-  if (kind === 2) {
-    const cpal = [];
-    for (let i = 0; i < 64; i++) {
-      const c = p[8 + 2 * i] | p[9 + 2 * i] << 8;
-      cpal.push([((c >> 11) * 255 / 31) | 0, (((c >> 5) & 63) * 255 / 63) | 0, ((c & 31) * 255 / 31) | 0]);
-    }
-    const row0 = p[136], px = p.subarray(137), d = img.data;
-    for (let i = 0; i < px.length; i++) {
-      const c = cpal[px[i] & 63], o = (row0 * 160 + i) * 4;
-      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    if (row0 === 0) frames++;
-    const now = performance.now();
-    if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
-    $("st-left").textContent = `Color mode, emulation ${(emuUs / 1000).toFixed(2)} ms/frame (budget 16.74)`;
-    $("st-right").textContent = `${fps.toFixed(0)} fps mirrored`;
-    if (lastKind !== 0) { lastKind = 0; refresh(); }
-    return;
-  }
-  const pal = [];
-  for (let i = 0; i < 16; i++) {
-    const c = p[8 + 2 * i] | p[9 + 2 * i] << 8;
-    pal.push([((c >> 11) * 255 / 31) | 0, (((c >> 5) & 63) * 255 / 63) | 0, ((c & 31) * 255 / 31) | 0]);
-  }
-  const px = p.subarray(40), d = img.data;
-  d.fill(0);
-  for (let i = 3; i < d.length; i += 4) d[i] = 255;
-  if (kind === 0) {
-    for (let i = 0; i < 160 * 144; i++) {
-      const c = pal[(px[i >> 2] >> ((i & 3) * 2)) & 3], o = i * 4;
-      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2];
-    }
-  } else {  // the 160x128 menu, centred vertically
-    for (let i = 0; i < 160 * 128; i++) {
-      const c = pal[(px[i >> 1] >> ((i & 1) * 4)) & 15], o = (i + 160 * 8) * 4;
-      d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2];
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  frames++;
-  const now = performance.now();
-  if (now - fpsAt > 1000) { fps = frames * 1000 / (now - fpsAt); frames = 0; fpsAt = now; }
-  $("st-left").textContent = kind === 0 ? `emulation ${(emuUs / 1000).toFixed(2)} ms/frame (budget 16.74)` : "menu";
-  $("st-right").textContent = `${fps.toFixed(0)} fps mirrored`;
-  if (kind !== lastKind) { lastKind = kind; refresh(); }
-}
-
-// Game list
-async function refresh() {
-  if (!writer) return;
-  try {
-    const i = await request("I");
-    state = { inGame: i[1] === 1, game: i[2] === 255 ? -1 : i[2], count: i[3], free: rd32(i, 4) };
-    const l = await request("L");
-    games = [];
-    for (let o = 0; o + 87 <= l.length; o += 87) {
-      const str = (a, b) => td.decode(l.subarray(o + a, o + b)).replace(/\0.*$/s, "");
-      const flags = l[o + 5];
-      games.push({ index: l[o], size: rd32(l, o + 1), save: (flags & 1) !== 0, cached: (flags & 2) !== 0,
-                   unsupported: (flags & 4) !== 0, name: str(6, 70), title: str(70, 87) });
-    }
-    renderGames();
-  } catch (e) { setStatus(e.message, "err"); }
-}
-
-function renderGames() {
-  const t = $("games");
-  t.innerHTML = "";
-  $("empty").style.display = games.length ? "none" : "block";
-  $("empty").textContent = "No games yet: drop a .gb file above.";
-  $("free").textContent = state ? `${(state.free / 1024) | 0} KB free` : "";
-  $("quit").disabled = !(state && state.inGame);
-  for (const g of games) {
-    const tr = document.createElement("tr");
-    if (state && state.inGame && state.game === g.index) tr.className = "playing";
-    const name = document.createElement("td"); name.className = "name"; name.textContent = g.name;
-    if (g.save) { const b = document.createElement("span"); b.className = "badge"; b.textContent = "save"; name.append(b); }
-    name.title = g.title;
-    const size = document.createElement("td"); size.className = "size"; size.textContent = `${(g.size / 1024) | 0} KB`;
-    const act = document.createElement("td"); act.className = "act";
-    const play = document.createElement("button"); play.textContent = "Play";
-    play.onclick = () => run(() => request("R", new Uint8Array([g.index])).then(p => check(p)));
-    const del = document.createElement("button"); del.textContent = "Delete"; del.className = "danger";
-    del.style.marginLeft = "6px";
-    del.onclick = () => {
-      if (!confirm(`Delete "${g.name}" from the Sprig?` + (g.save ? " Its save goes too." : ""))) return;
-      run(() => request("X", new Uint8Array([g.index])).then(p => check(p)));
-    };
-    act.append(play, del);
-    tr.append(name, size, act);
-    t.append(tr);
-  }
-}
-
-async function run(fn) {
-  try { await fn(); } catch (e) { setStatus(e.message, "err"); }
-  await refresh();
-}
-
-// Upload: size and name, 1 KB chunks, then the CRC-32 of the whole file
-async function upload(files) {
-  if (!writer) { setStatus("Connect the Sprig first", "err"); return; }
-  const bar = $("progress"), fill = bar.firstElementChild, msg = $("upmsg");
-  for (const f of files) {
-    const data = new Uint8Array(await f.arrayBuffer());
-    const name = f.name.replace(/\.[^.]*$/, "").slice(0, 39);
-    bar.style.display = "block"; fill.style.width = "0%";
-    msg.textContent = `Sending ${f.name}…`; msg.style.color = "";
-    const t0 = performance.now();
-    try {
-      const begin = new Uint8Array(4 + te.encode(name).length);
-      begin.set(u32(data.length)); begin.set(te.encode(name), 4);
-      check(await request("U", begin));
-      for (let off = 0; off < data.length; off += CHUNK) {
-        const part = data.subarray(off, off + CHUNK), pl = new Uint8Array(4 + part.length);
-        pl.set(u32(off)); pl.set(part, 4);
-        check(await request("D", pl), 4);
-        fill.style.width = `${Math.min(100, (off + CHUNK) * 100 / data.length)}%`;
-      }
-      check(await request("F", u32(crc32(data)), 30000), 1);
-      const s = ((performance.now() - t0) / 1000).toFixed(1);
-      msg.textContent = `${f.name} added (${(data.length / 1024) | 0} KB in ${s} s)`;
-      msg.style.color = "var(--accent)";
-    } catch (e) {
-      msg.textContent = `${f.name}: ${e.message}`; msg.style.color = "var(--warn)";
-    }
-    await refresh();
-  }
-  setTimeout(() => { bar.style.display = "none"; }, 1500);
-}
-
-const drop = $("drop");
-drop.onclick = () => $("file").click();
-$("file").onchange = e => { upload([...e.target.files]); e.target.value = ""; };
-drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files]); };
-
-// Keyboard to Game Boy buttons, bit order as in gb.h
-const KEYMAP = {
-  ArrowRight: 1, KeyD: 1, ArrowLeft: 2, KeyA: 2, ArrowUp: 4, KeyW: 4, ArrowDown: 8, KeyS: 8,
-  KeyX: 16, KeyZ: 32, Backspace: 64, Enter: 128,
-};
-let keys = 0;
-function setKeys(k) {
-  if (k === keys) return;
-  keys = k;
-  if (writer) send("K", new Uint8Array([keys])).catch(() => {});
-}
-addEventListener("keydown", e => {
-  if (e.ctrlKey && e.shiftKey && (e.code === "Digit4")) {  // unload the running game
-    e.preventDefault();
-    if (writer) run(() => request("Q"));
-    return;
-  }
-  if (e.ctrlKey || e.altKey || e.metaKey || !(e.code in KEYMAP)) return;
-  e.preventDefault();
-  setKeys(keys | KEYMAP[e.code]);
-});
-addEventListener("keyup", e => { if (e.code in KEYMAP) setKeys(keys & ~KEYMAP[e.code]); });
-addEventListener("blur", () => setKeys(0));
-
-$("quit").onclick = () => run(() => request("Q"));
-$("palette").onchange = e => { if (writer) send("P", new Uint8Array([+e.target.value])); };
-
-// Connection
 async function connect() {
   try {
     port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x2E8A }] });
     await port.open({ baudRate: 115200, bufferSize: 1 << 16 });
     await port.setSignals({ dataTerminalReady: true });
     writer = port.writable.getWriter();
-    setStatus("Connected", "ok");
-    $("connect").textContent = "Disconnect";
-    $("palette").disabled = false;
-    readLoop();
-    await refresh();
   } catch (e) {
-    if (e.name !== "NotFoundError") setStatus(e.message, "err");
+    try { await port?.close(); } catch {}
+    port = null;
+    if (e.name !== "NotFoundError") status(e.message, true);
+    return;
   }
+  status("Connected");
+  $("connect").textContent = "Disconnect";
+  $("tint").disabled = false;
+  readLoop();
+  refresh();
 }
 
 async function readLoop() {
@@ -371,10 +180,10 @@ async function readLoop() {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      feed(value);
+      receive(value);
     }
   } catch (e) {
-    setStatus("Link lost: " + e.message, "err");
+    status(`Connection lost: ${e.message}`, true);
   } finally {
     reader.releaseLock();
     disconnect();
@@ -384,18 +193,185 @@ async function readLoop() {
 async function disconnect() {
   const p = port;
   port = null;
-  try { if (writer) { writer.releaseLock(); writer = null; } } catch (e) {}
-  try { if (p) await p.close(); } catch (e) {}
-  $("connect").textContent = "Connect Sprig";
-  $("quit").disabled = true; $("palette").disabled = true;
-  if (!$("status").classList.contains("err")) setStatus("Not connected");
+  try { writer?.releaseLock(); } catch {}
+  writer = null;
+  try { await p?.close(); } catch {}
+  $("connect").textContent = "Connect";
+  $("quit").disabled = $("tint").disabled = true;
+  if ($("status").className !== "err") status("Not connected");
 }
 
+// ---- screen
+
+const ctx = $("screen").getContext("2d");
+const image = ctx.createImageData(160, 144);
+const pixels = new Uint32Array(image.data.buffer);
+let mode = "", frames = 0, emuMs = 0, statsAt = performance.now();
+
+// RGB565 colours from the packet to canvas pixels (0xAABBGGRR).
+function palette(p, n) {
+  const out = new Uint32Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = p[8 + 2 * i] | p[9 + 2 * i] << 8;
+    out[i] = 0xFF000000 | (c & 31) * 255 / 31 << 16 | (c >> 5 & 63) * 255 / 63 << 8 | (c >> 11) * 255 / 31;
+  }
+  return out;
+}
+
+function frame(p) {
+  const kind = p[0];
+  if (kind === 2) {  // Color: half a frame, one palette index per pixel
+    const pal = palette(p, 64), row0 = p[136], src = p.subarray(137);
+    for (let i = 0, o = row0 * 160; i < src.length; i++) pixels[o + i] = pal[src[i] & 63];
+    if (row0 === 0) frames++;
+  } else if (kind === 0) {  // Game Boy: 2 bits per pixel
+    const pal = palette(p, 16);
+    for (let i = 0; i < 160 * 144; i++) pixels[i] = pal[p[40 + (i >> 2)] >> (i & 3) * 2 & 3];
+    frames++;
+  } else {  // the 160x128 menu at 4 bits per pixel, centred
+    const pal = palette(p, 16);
+    pixels.fill(0xFF000000);
+    for (let i = 0; i < 160 * 128; i++) pixels[1280 + i] = pal[p[40 + (i >> 1)] >> (i & 1) * 4 & 15];
+    frames++;
+  }
+  ctx.putImageData(image, 0, 0);
+  emuMs = (p[2] | p[3] << 8) / 1000;
+
+  const m = kind === 1 ? "menu" : "game";
+  if (m !== mode) { mode = m; $("tint").selectedIndex = 0; refresh(); }
+  const now = performance.now();
+  if (now - statsAt >= 1000) {
+    const fps = Math.round(frames * 1000 / (now - statsAt));
+    $("stats").textContent = mode === "menu" ? "Menu"
+      : `${kind === 2 ? "Color game" : "Game"}: ${emuMs.toFixed(1)} ms per frame of 16.7, ${fps} fps here`;
+    frames = 0;
+    statsAt = now;
+  }
+}
+
+// ---- games
+
+async function refresh() {
+  if (!writer) return;
+  try {
+    const info = await request("I"), list = await request("L");
+    const inGame = info[1] !== 0, running = inGame ? info[2] : -1;
+    $("quit").disabled = !inGame;
+    $("free").textContent = info[20] ? `(${(rd32(info, 21) / 1024).toFixed(1)} MB free on the SD card)`
+                                     : `(${kb(rd32(info, 4))} free in flash)`;
+    const rows = [];
+    for (let o = 0; o + 87 <= list.length; o += 87) rows.push(gameRow(list.subarray(o, o + 87), running));
+    $("games").replaceChildren(...rows);
+    $("empty").hidden = rows.length > 0;
+    $("empty").textContent = "No games yet.";
+  } catch (e) {
+    status(e.message, true);
+  }
+}
+
+function gameRow(g, running) {
+  const text = (a, b) => dec.decode(g.subarray(a, b)).replace(/\0.*$/s, "");
+  const index = g[0], flags = g[5], name = text(6, 70);
+  const notes = [flags & 1 && "save", flags & 2 && "in flash", flags & 4 && "not supported"].filter(Boolean);
+
+  const tr = document.createElement("tr");
+  tr.innerHTML = '<td></td><td class="dim"></td><td class="num"></td>' +
+                 '<td class="num"><button>Play</button> <button>Delete</button></td>';
+  const [cName, cNotes, cSize, cActions] = tr.cells;
+  const [play, del] = cActions.querySelectorAll("button");
+  if (index === running) tr.className = "playing";
+  cName.textContent = name;
+  cName.title = text(70, 87);
+  cNotes.textContent = notes.join(", ");
+  cSize.textContent = kb(rd32(g, 1));
+  play.disabled = (flags & 4) !== 0;
+  play.onclick = () => act(() => request("R", new Uint8Array([index])).then(ok));
+  del.onclick = () => {
+    if (confirm(`Delete ${name} from the Sprig?${flags & 1 ? " This also deletes its save." : ""}`))
+      act(() => request("X", new Uint8Array([index])).then(ok));
+  };
+  return tr;
+}
+
+async function act(fn) {
+  try { await fn(); } catch (e) { status(e.message, true); }
+  await refresh();
+}
+
+// Upload: begin with the size and name, send 1 KB pieces, then finish with
+// the CRC-32 of the whole file.
+async function upload(files) {
+  if (!writer) { status("Connect the Sprig first", true); return; }
+  const bar = $("progress"), msg = $("upload");
+  for (const f of files) {
+    const data = new Uint8Array(await f.arrayBuffer()), t0 = performance.now();
+    const name = enc.encode(f.name.replace(/\.[^.]*$/, "").slice(0, 39));
+    bar.hidden = false;
+    bar.max = data.length;
+    bar.value = 0;
+    msg.className = "dim";
+    msg.textContent = `Sending ${f.name}…`;
+    try {
+      const begin = new Uint8Array(4 + name.length);
+      begin.set(u32(data.length));
+      begin.set(name, 4);
+      ok(await request("U", begin));
+      for (let off = 0; off < data.length; off += 1024) {
+        const part = data.subarray(off, off + 1024), pkt = new Uint8Array(4 + part.length);
+        pkt.set(u32(off));
+        pkt.set(part, 4);
+        ok(await request("D", pkt), 4);
+        bar.value = off + part.length;
+      }
+      ok(await request("F", u32(crc32(data)), 30000), 1);
+      msg.textContent = `Added ${f.name} (${kb(data.length)} in ${((performance.now() - t0) / 1000).toFixed(1)} s).`;
+    } catch (e) {
+      msg.className = "err";
+      msg.textContent = `${f.name}: ${e.message}`;
+    }
+    await refresh();
+  }
+  bar.hidden = true;
+}
+
+const drop = $("drop");
+$("file").onchange = e => { upload([...e.target.files]); e.target.value = ""; };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); upload([...e.dataTransfer.files]); };
+
+// ---- controls
+
+// Keyboard to Game Boy buttons, bits as in gb.h.
+const KEYS = {
+  ArrowRight: 1, KeyD: 1, ArrowLeft: 2, KeyA: 2, ArrowUp: 4, KeyW: 4, ArrowDown: 8, KeyS: 8,
+  KeyX: 16, KeyZ: 32, Backspace: 64, Enter: 128,
+};
+let held = 0;
+function setHeld(mask) {
+  if (mask === held) return;
+  held = mask;
+  if (writer) send("K", new Uint8Array([held])).catch(() => {});
+}
+addEventListener("keydown", e => {
+  if (!writer) return;
+  if (e.ctrlKey && e.shiftKey && e.code === "Digit4") {
+    e.preventDefault();
+    act(() => request("Q"));
+  } else if (e.code in KEYS && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    setHeld(held | KEYS[e.code]);
+  }
+});
+addEventListener("keyup", e => { if (e.code in KEYS) setHeld(held & ~KEYS[e.code]); });
+addEventListener("blur", () => setHeld(0));
+
+$("tint").append(...TINTS.map((t, i) => new Option(t, i)));
+$("tint").onchange = e => { if (writer) send("P", new Uint8Array([+e.target.value])); };
+$("quit").onclick = () => act(() => request("Q"));
 $("connect").onclick = () => (port ? disconnect() : connect());
 if (!("serial" in navigator)) {
-  $("unsupported").style.display = "block";
+  $("nosupport").hidden = false;
   $("connect").disabled = true;
 }
 </script>
-</body>
-</html>
