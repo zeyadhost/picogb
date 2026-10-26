@@ -1,0 +1,39 @@
+# Your own games and saves: never commit ROMs or personal backups
+gameboy-games/
+sprig-backup-*/
+*.gb
+*.gbc
+*.sav
+*.s1
+*.s2
+*.s3
+*.s4
+*.res
+
+# Build output (firmware/PicoGB.uf2 is kept on purpose)
+firmware/build_gb/
+bench/build*/
+*.elf
+*.bin
+*.map
+
+# Host test binaries and their output
+host/gbtest
+host/*.exe
+host/roms/
+host/*.ppm
+host/*.pgm
+host/*.png
+host/*.out
+
+# Python
+__pycache__/
+*.pyc
+
+# Local tool and editor settings
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
