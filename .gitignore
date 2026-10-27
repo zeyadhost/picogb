@@ -1,5 +1,6 @@
 # Your own games and saves: never commit ROMs or personal backups
 gameboy-games/
+homebrew/
 sprig-backup-*/
 *.gb
 *.gbc
