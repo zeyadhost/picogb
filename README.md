@@ -38,6 +38,23 @@ about 8 seconds for a 1 MB game. Recently played games stay in flash and start i
 Use games you own: dumps of your own cartridges, or homebrew. `gameboy-games/` and ROM files
 are in `.gitignore`, so they never end up in a repository.
 
+## Free homebrew games
+
+[Homebrew Hub](https://hh.gbdev.io) archives over a thousand games made for the Game Boy and
+Game Boy Color, free to download. `loader/fetch_homebrew.py` downloads them into `homebrew/`,
+keeps only the ones PicoGB can run, and writes each game's author, licence and web page to
+`homebrew/index.json`:
+
+```
+python loader/fetch_homebrew.py --list             # see what is there
+python loader/fetch_homebrew.py                    # download everything (about 1100 games, 260 MB)
+python loader/fetch_homebrew.py --licensed-only    # only games that state a licence
+python loader/fetch_homebrew.py --platform GBC --tag puzzle
+python loader/fetch_homebrew.py --upload --max-kb 512   # and send them to the Sprig
+```
+
+The SD card has to hold the games you upload, so pick the ones you want rather than all of them.
+
 ## Controls
 
 | Sprig | In a game | In the menu |
@@ -80,7 +97,7 @@ python loader/gbload.py list
 python loader/gbload.py upload game.gb
 python loader/gbload.py run 0
 python loader/gbload.py shot screen.png
-python loader/gbload.py perf          # speed and audio stats of the running game
+python loader/gbload.py perf          # speed, audio and SD stats of the running game
 python loader/gbload.py backup        # saves, states, screenshots, settings and log to the PC
 ```
 
@@ -116,16 +133,20 @@ Only one program can use the Sprig's USB port at a time, so close the web loader
 ## Speed
 
 On the Sprig at 250 MHz a frame has to finish in 16.7 ms. Original Game Boy games take about
-7 ms. Color games take 9 to 14 ms, and the heaviest scenes get right up to the limit, so Color mode
-can feel slow now and then. The screen is fed at 25 MHz so it can show nearly every frame.
+6 ms and Color games 7 to 11 ms (Pokémon Pure Blue went from 15 ms to 10.4 ms with the work in
+this version). Frames are paced by the clock, so they come at an even 59.7 per second. Games that
+run in Color double speed have the odd scene that needs more than a frame's time, and slow down
+there.
 
 ## Limits
 
-- Games must fit in the roughly 1.5 MB of flash, which rules out the biggest Color games (2 MB and
-  up, like Pokémon Crystal).
+- Games up to 8 MB run. The first 1.8 MB is kept in flash; the rest is read from the SD card in
+  4 KB pages as the game needs it, which takes about 4 ms per page. A game that jumps around
+  its upper banks a lot can stutter.
 - Each Color frame is shown with the palettes it started with, so the few games that change colours
   partway down the screen look slightly off.
-- Without an SD card, games uploaded over USB live in flash, but there are no save states.
+- Without an SD card, games uploaded over USB live in flash, but there are no save states and no
+  games over 1.8 MB.
 
 ## How it fits together
 
@@ -134,6 +155,11 @@ can feel slow now and then. The screen is fed at 25 MHz so it can show nearly ev
   portrait panel and sends it out in strips.
 - The screen and the SD card share one SPI bus. A lock decides who has it, and the receive buffer
   is emptied after every screen transfer, because leftover bytes break the SD card's replies.
+- Everything the emulator runs is kept in RAM. Code left in flash has to go through a small
+  cache that the game's ROM keeps pushing out, and each miss stalls the CPU.
+- A big game's upper banks are read from the card into RAM the game isn't using: the spare part of
+  the 32 KB cart RAM, the bank 0 copy, and on original Game Boy games the Color-only work RAM. The
+  game file's place on the card is mapped once at launch, so a page read never has to seek.
 - Battery saves are written a block at a time while you play. Some games, Pokémon among them, use
   save RAM as scratch space, and rewriting the whole save each time froze the game.
 
