@@ -78,6 +78,7 @@ static void audio_run(bool on) {
 // Performance counters for the running game, read with the loader's 'A' command.
 static struct {
     uint32_t frames, underruns, slow_frames, max_emu_us, max_frame_us, sum_emu_us, stalls, max_stall_ms, dropped;
+    uint32_t page_loads, max_load_us, sum_load_us;  // big games: 4 KB ROM pages read from the card
     uint32_t ppu0, apu0;  // gb_prof_* when the counters were reset
 } perf;
 
@@ -245,6 +246,9 @@ static bool publish(const uint8_t *src, uint8_t kind, const uint16_t *cpal = nul
 static uint16_t strip[2][LCD_COLS * STRIP];
 static uint8_t row_src[UI_H], row_frac[UI_H];  // view row -> source row and blend weight
 
+// The bus is held strip by strip: if core 0 is waiting to read the SD card
+// (a big game loading a ROM page mid-frame), it gets the bus between strips
+// instead of after the whole 15 ms frame.
 static void GB_FAST(show)(const uint8_t *src, uint8_t kind) {
     sprig_bus_take(BUS_LCD);
     for (int s = 0; s < LCD_ROWS / STRIP; s++) {
@@ -279,6 +283,11 @@ static void GB_FAST(show)(const uint8_t *src, uint8_t kind) {
         }
         if (s == LCD_ROWS / STRIP - 1) disp_pending = false;  // source no longer needed
         while (sprig_lcd_busy()) tight_loop_contents();
+        if (sprig_bus_wanted()) {
+            sprig_bus_give(BUS_LCD);
+            while (sprig_bus_wanted()) tight_loop_contents();
+            sprig_bus_take(BUS_LCD);
+        }
         sprig_lcd_rows(s * STRIP, STRIP, out);
     }
     sprig_bus_give(BUS_LCD);  // waits for the last strip to finish
@@ -479,6 +488,74 @@ static void save_battery() {
     if (gb.has_battery && gb.ram_size) lib_save_write(playing, cart_ram, gb.ram_size);
 }
 
+// ---------------------------------------------------------------- big games
+
+// Banks that don't fit in flash are read from the card in 4 KB pages, into RAM
+// the running game leaves free: the bank 0 copy (bank 0 is then read from
+// flash), cart RAM beyond the game's own, and on the original Game Boy work
+// RAM banks 2-7, which only the Color has.
+#define MAX_PAGES 18
+#define NO_BANK 0xFFFF
+static struct { uint8_t *buf; uint16_t bank; uint8_t page; uint32_t last; } pages[MAX_PAGES];
+static int npages;
+static uint32_t page_clock;
+
+static const uint8_t *GB_FAST(rom_page)(gb_t *, uint32_t bank, uint32_t page, bool load) {
+    for (int i = 0; i < npages; i++)
+        if (pages[i].bank == bank && pages[i].page == page) {
+            pages[i].last = ++page_clock;
+            return pages[i].buf;
+        }
+    if (!load || !npages) return nullptr;
+    int v = 0;  // least recently used
+    for (int i = 1; i < npages; i++)
+        if (pages[i].last < pages[v].last) v = i;
+    pages[v].bank = NO_BANK;
+    uint32_t t0 = time_us_32();
+    bool ok = sd_rom_read(bank * 0x4000 + page * 0x1000, pages[v].buf, 0x1000);
+    uint32_t us = time_us_32() - t0;
+    perf.sum_load_us += us;
+    if (us > perf.max_load_us) perf.max_load_us = us;
+    if (!ok) return nullptr;
+    pages[v].bank = bank;
+    pages[v].page = page;
+    pages[v].last = ++page_clock;
+    perf.page_loads++;
+    return pages[v].buf;
+}
+
+static void pages_forget() {
+    for (int i = 0; i < npages; i++) pages[i].bank = NO_BANK;
+}
+
+static void pages_add(uint8_t *p, uint32_t len) {
+    for (uint32_t o = 0; o + 0x1000 <= len && npages < MAX_PAGES; o += 0x1000) {
+        pages[npages].buf = p + o;
+        pages[npages++].bank = NO_BANK;
+    }
+}
+
+// Starts (or restarts) the game in `e`; cart RAM must already hold its save.
+static int start_rom(const lib_entry_t *e) {
+    const uint8_t *rom = lib_rom(e);
+    bool big = e->stored_len < e->rom_len;
+    npages = 0;  // nothing may be found in the old pages while gb_init maps the banks
+    gb.rom_page = big ? rom_page : nullptr;
+    gb.rom_resident = e->stored_len / 0x4000;
+    int r = gb_init(&gb, rom, e->rom_len, cart_ram, fbs[back]);
+    if (r) return r;
+    if (big) {
+        uint32_t own = (gb.ram_size + 0xFFF) & ~0xFFFu;
+        pages_add(bank0, sizeof bank0);
+        pages_add(cart_ram + own, sizeof cart_ram - own);
+        if (!gb.cgb) pages_add(gb.wram + 0x2000, sizeof gb.wram - 0x2000);
+    } else {
+        memcpy(bank0, rom, sizeof bank0);
+        gb_set_bank0(&gb, bank0);
+    }
+    return GB_OK;
+}
+
 static bool save_state(const char *path) {
     gb_state_hdr_t h = {GB_STATE_MAGIC, GB_STATE_VERSION, sizeof(gb_t), gb.ram_size, {0}, {0}, gb.frame};
     gb_title(gb.rom, h.title);
@@ -499,18 +576,23 @@ static int load_state(const char *path) {
     gb_state_hdr_t h;
     char title[17];
     gb_title(gb.rom, title);
-    if (sd_read(&h, sizeof h) != (int)sizeof h || h.magic != GB_STATE_MAGIC || h.version != GB_STATE_VERSION ||
-        h.gb_size != sizeof(gb_t) || h.ram_size != gb.ram_size || strcmp(h.title, title) ||
-        size != sizeof h + sizeof(gb_t) + h.ram_size) {
+    bool known = sd_read(&h, sizeof h) == (int)sizeof h && h.magic == GB_STATE_MAGIC &&
+                 ((h.version == GB_STATE_VERSION && h.gb_size == sizeof(gb_t)) ||
+                  (h.version == 4 && h.gb_size == GB_STATE_V4_SIZE));
+    if (!known || h.ram_size != gb.ram_size || strcmp(h.title, title) || size != sizeof h + h.gb_size + h.ram_size) {
         sd_read_close();
         return LOAD_NONE;
     }
     const uint8_t *rom = gb.rom, *b0 = gb.rom_bank0;
     uint8_t *ram = gb.cart_ram, *fb = gb.fb;
     void (*so)(uint8_t) = gb.serial_out;
-    bool ok = sd_read(&gb, sizeof gb) == (int)sizeof gb && (!h.ram_size || sd_read(cart_ram, h.ram_size) == (int)h.ram_size);
+    const uint8_t *(*page)(gb_t *, uint32_t, uint32_t, bool) = gb.rom_page;
+    uint16_t resident = gb.rom_resident;
+    bool ok = sd_read(&gb, h.gb_size) == (int)h.gb_size && (!h.ram_size || sd_read(cart_ram, h.ram_size) == (int)h.ram_size);
     sd_read_close();
     gb.rom = rom; gb.rom_bank0 = b0; gb.cart_ram = ram; gb.fb = fb; gb.serial_out = so;
+    gb.rom_page = page; gb.rom_resident = resident;
+    pages_forget();  // the state may have overwritten the work RAM pages
     gb_remap(&gb);
     return ok ? LOAD_OK : LOAD_BROKEN;
 }
@@ -566,6 +648,7 @@ static void quit_game() {
         if (!save_state(p)) log_line("resume save failed: %s", cur.name);
     }
     if (save_file_open) { sd_save_close(); save_file_open = false; }
+    if (gb.rom_page) { sd_rom_close(); gb.rom_page = nullptr; npages = 0; }
     save_game_palette();
     set_palette(default_palette);
     state = ST_MENU;
@@ -612,13 +695,15 @@ static void save_game_palette() {
     sd_store(p, buf, n);
 }
 
-// Copies a game from the card into the flash cache. Returns null or an error.
+// Copies a game from the card into the flash cache: all of it, or as many
+// banks as fit for a big game. Returns null or an error.
 static const char *copy_to_flash(const sd_game_t *g, int *lib_index) {
     char p[96];
     sd_path(p, "games", g->name, g->ext);
-    uint32_t size;
-    if (!sd_read_open(p, &size)) return "can't open the game file";
-    const char *err = lib_upload_begin(g->name, size, g->stamp, false, true);
+    uint32_t full, size;
+    if (!sd_read_open(p, &full)) return "can't open the game file";
+    size = full < lib_capacity() ? full : lib_capacity() & ~0x3FFFu;
+    const char *err = lib_upload_begin(g->name, full, size, g->stamp, false, true);
     if (err) { sd_read_close(); return err; }
     uint32_t crc = 0, shown = 0;
     for (uint32_t off = 0; off < size;) {
@@ -659,8 +744,14 @@ static const char *launch(int index) {
     lib_touch(li);
     const lib_entry_t *e = lib_get(li);
     if (!e) return "flash cache error";
-    const uint8_t *rom = lib_rom(e);
-    memcpy(bank0, rom, sizeof bank0);
+    if (e->stored_len < e->rom_len) {  // the rest of a big game is read from the card as it plays
+        char p[96];
+        sd_path(p, "games", g.name, g.ext);
+        int pieces;
+        if (!sd_rom_open(p, e->stored_len, &pieces)) return "can't open the game file";
+        log_line("big game %s: %lu of %lu KB in flash, the rest read from the card (%d pieces)", g.name,
+                 (unsigned long)(e->stored_len / 1024), (unsigned long)(e->rom_len / 1024), pieces);
+    }
 
     cur = g;
     set_palette(use_sd ? game_palette(&g) : default_palette);
@@ -674,9 +765,8 @@ static const char *launch(int index) {
         lib_save_read(e, cart_ram, sizeof cart_ram);
     }
     back = 0;
-    int r = gb_init(&gb, rom, e->rom_len, cart_ram, fbs[back]);
+    int r = start_rom(e);
     if (r) return cart_error(r);
-    gb_set_bank0(&gb, bank0);
     playing = e;
     playing_index = index;
     state = ST_GAME;
@@ -688,10 +778,7 @@ static const char *launch(int index) {
         char p[96];
         game_path(p, "states", ".res");
         int r = load_state(p);
-        if (r == LOAD_BROKEN) {
-            gb_init(&gb, rom, e->rom_len, cart_ram, fbs[back]);
-            gb_set_bank0(&gb, bank0);
-        }
+        if (r == LOAD_BROKEN) start_rom(e);
         if (gb.has_battery && gb.ram_size) {
             game_path(p, "saves", ".sav");
             save_file_open = sd_save_open(p, cart_ram, gb.ram_size);
@@ -818,7 +905,7 @@ static void on_command(uint8_t cmd, const uint8_t *p, uint16_t len) {
             char *dot = strrchr(name, '.');
             if (dot) *dot = 0;
             name[LIB_NAME_LEN - 1] = 0;
-            err = lib_upload_begin(name, rd32(p), 0, true, false);
+            err = lib_upload_begin(name, rd32(p), rd32(p), 0, true, false);
         }
         reply('U', err ? 1 : 0, err);
         break;
@@ -869,9 +956,10 @@ static void on_command(uint8_t cmd, const uint8_t *p, uint16_t len) {
     case 'Q': quit_game(); reply('Q', 0, nullptr); break;
     case 'A': {
         uint32_t f = perf.frames ? perf.frames : 1;
-        uint32_t v[11] = {perf.frames, perf.underruns, perf.slow_frames, perf.max_emu_us, perf.max_frame_us,
+        uint32_t v[14] = {perf.frames, perf.underruns, perf.slow_frames, perf.max_emu_us, perf.max_frame_us,
                           perf.sum_emu_us / f, perf.stalls, perf.max_stall_ms,
-                          (gb_prof_ppu_us - perf.ppu0) / f, (gb_prof_apu_us - perf.apu0) / f, perf.dropped};
+                          (gb_prof_ppu_us - perf.ppu0) / f, (gb_prof_apu_us - perf.apu0) / f, perf.dropped,
+                          perf.page_loads, perf.max_load_us, perf.sum_load_us};
         link_send('A', (const uint8_t *)v, sizeof v, true);
         if (len >= 1 && p[0]) {
             memset(&perf, 0, sizeof perf);
@@ -1184,8 +1272,7 @@ static void restart_game() {
     if (use_sd) sd_remove(p);
     save_battery();
     back = 0;
-    gb_init(&gb, lib_rom(playing), playing->rom_len, cart_ram, fbs[back]);
-    gb_set_bank0(&gb, bank0);
+    start_rom(playing);
 }
 
 static bool wait_release;  // after leaving the pause menu, ignore keys until they are released

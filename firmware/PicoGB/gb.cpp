@@ -19,7 +19,8 @@ GB_INLINE uint32_t wrap_bank(const gb_t *g, uint32_t b) {
     return (n & (n - 1)) ? b % n : b & (n - 1);
 }
 
-static void GB_FAST(map_rom)(gb_t *g) {
+// The banks mapped at 0000-3FFF and 4000-7FFF.
+GB_INLINE void rom_banks_now(const gb_t *g, uint32_t *lo_out, uint32_t *hi_out) {
     uint32_t lo = 0, hi;
     switch (g->mbc) {
     case 1:
@@ -31,14 +32,34 @@ static void GB_FAST(map_rom)(gb_t *g) {
     case 5: hi = g->rom_bank & 0x1FF; break;
     default: hi = 1;
     }
-    lo = wrap_bank(g, lo);
-    hi = wrap_bank(g, hi);
-    const uint8_t *b0 = lo == 0 ? g->rom_bank0 : g->rom + lo * 0x4000;
-    const uint8_t *b1 = g->rom + hi * 0x4000;
+    *lo_out = wrap_bank(g, lo);
+    *hi_out = wrap_bank(g, hi);
+}
+
+// Where page `page` of a bank is, or null if it has to be loaded first.
+GB_INLINE const uint8_t *rom_page_ptr(gb_t *g, uint32_t bank, uint32_t page) {
+    if (bank == 0) return g->rom_bank0 + page * 0x1000;
+    if (bank < g->rom_resident) return g->rom + bank * 0x4000 + page * 0x1000;
+    return g->rom_page(g, bank, page, false);
+}
+
+static void GB_FAST(map_rom)(gb_t *g) {
+    uint32_t lo, hi;
+    rom_banks_now(g, &lo, &hi);
     for (int i = 0; i < 4; i++) {
-        g->rd[i] = b0 + i * 0x1000;
-        g->rd[4 + i] = b1 + i * 0x1000;
+        g->rd[i] = rom_page_ptr(g, lo, i);
+        g->rd[4 + i] = rom_page_ptr(g, hi, i);
     }
+}
+
+// A read from a ROM page that isn't in memory: load it (big games only).
+// Loading may drop other pages from the cache, so the map is rebuilt.
+static uint8_t GB_FAST(read_rom_slow)(gb_t *g, uint16_t a) {
+    uint32_t lo, hi;
+    rom_banks_now(g, &lo, &hi);
+    const uint8_t *p = g->rom_page ? g->rom_page(g, a < 0x4000 ? lo : hi, (a >> 12) & 3, true) : nullptr;
+    map_rom(g);
+    return p ? p[a & 0xFFF] : 0xFF;
 }
 
 // Cart RAM: fast reads for plain RAM; writes always take the slow path so
@@ -184,6 +205,7 @@ GB_INLINE uint8_t *wram_ptr(gb_t *g, uint16_t a) {
 }
 
 static uint8_t GB_FAST(read_slow)(gb_t *g, uint16_t a) {
+    if (a < 0x8000) return read_rom_slow(g, a);
     if (a < 0xC000) {  // cart RAM / RTC
         if (g->mbc == 3 && g->ram_en && g->ram_bank >= 8) return g->ram_bank <= 0x0C ? g->rtc_latched[g->ram_bank - 8] : 0xFF;
         uint8_t *p = cart_ram_ptr(g, a);
@@ -418,11 +440,15 @@ int gb_init(gb_t *g, const uint8_t *rom, uint32_t rom_size, uint8_t *cart_ram, u
     if (err) return err;
 
     void (*serial)(uint8_t) = g->serial_out;
+    const uint8_t *(*page)(gb_t *, uint32_t, uint32_t, bool) = g->rom_page;
+    uint16_t resident = g->rom_resident;
     memset(g, 0, sizeof *g);
     g->serial_out = serial;
     g->rom = g->rom_bank0 = rom;
     g->rom_size = rom_size;
     g->rom_banks = rom_size / 0x4000;
+    g->rom_page = page;
+    g->rom_resident = page && resident < g->rom_banks ? resident : g->rom_banks;
     g->cart_ram = cart_ram;
     g->ram_size = ram;
     g->mbc = mbc;

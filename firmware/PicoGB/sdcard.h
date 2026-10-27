@@ -40,6 +40,14 @@ bool sd_read_open(const char *path, uint32_t *size);
 int sd_read(void *buf, uint32_t n);  // bytes read, <0 on error
 void sd_read_close(void);
 
+// The running game's ROM, kept open for big games whose upper banks are read
+// from the card while they play. Bytes from `from` on will be read; `pieces`
+// gets the number of separate runs they are stored in (0: too fragmented to
+// map, every read seeks).
+bool sd_rom_open(const char *path, uint32_t from, int *pieces);
+bool sd_rom_read(uint32_t off, void *buf, uint32_t n);
+void sd_rom_close(void);
+
 // Sequential write to a temporary file that replaces `path` on commit, so a
 // power cut never leaves a half-written save.
 bool sd_write_open(const char *path);

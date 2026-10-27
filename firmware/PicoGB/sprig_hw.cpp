@@ -21,6 +21,7 @@
 static const uint8_t button_pins[NUM_BUTTONS] = {5, 6, 7, 8, 12, 13, 14, 15};  // W A S D I J K L
 static int lcd_dma;
 static mutex_t bus;
+static volatile int sd_waiting;  // core 0 is waiting for the bus to talk to the SD card
 
 static void lcd_cmd(uint8_t cmd, std::initializer_list<uint8_t> d = {}) {
     gpio_put(PIN_DC, 0);
@@ -90,7 +91,9 @@ void sprig_init(void) {
 }
 
 void sprig_bus_take(int who) {
+    if (who == BUS_SD) sd_waiting++;
     mutex_enter_blocking(&bus);
+    if (who == BUS_SD) sd_waiting--;
     if (who == BUS_LCD) {
         spi_set_baudrate(LCD_SPI, LCD_HZ);
         gpio_put(PIN_CS, 0);
@@ -112,6 +115,8 @@ void sprig_bus_give(int who) {
     }
     mutex_exit(&bus);
 }
+
+bool sprig_bus_wanted(void) { return sd_waiting; }
 
 bool sprig_lcd_busy(void) { return dma_channel_is_busy(lcd_dma) || spi_is_busy(LCD_SPI); }
 

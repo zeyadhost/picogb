@@ -10,7 +10,7 @@
 #define ROOT "/PicoGB"
 
 static SdFat32 sd;
-static File32 rf, wf, sf;
+static File32 rf, wf, sf, gf;
 static bool mounted;
 static uint32_t free_kb;
 static char wpath[96], wtmp[100];
@@ -240,6 +240,73 @@ bool sd_append_line(const char *path, const char *line) {
     f.write(line, strlen(line));
     f.write("\r\n", 2);
     return f.close();
+}
+
+// ---------------------------------------------------------------- game ROM
+
+// The ROM is read straight from the card's sectors. A seek on FAT walks the
+// cluster chain from the start of the file, which takes tens of
+// milliseconds for a big ROM, so at open the part of the file that will be
+// read is mapped once into runs of consecutive sectors.
+#define ROM_RUNS 64
+static struct { uint32_t off, len, sector; } runs[ROM_RUNS];  // file bytes [off, off + len) start at `sector`
+static int nruns;
+
+static bool map_runs(uint32_t from, uint32_t size) {
+    nruns = 0;
+    Sector_t first, last;
+    if (gf.contiguousRange(&first, &last)) {
+        runs[nruns++] = {0, size, first};
+        return true;
+    }
+    uint32_t cs = sd.bytesPerCluster(), spc = sd.sectorsPerCluster();
+    for (uint32_t pos = from & ~(cs - 1); pos < size; pos += cs) {
+        if (!gf.seekSet(pos + 1)) return false;  // leaves curCluster() at the cluster holding `pos`
+        uint32_t sector = sd.dataStartSector() + (gf.curCluster() - 2) * spc;
+        if (nruns && runs[nruns - 1].off + runs[nruns - 1].len == pos &&
+            runs[nruns - 1].sector + runs[nruns - 1].len / 512 == sector) {
+            runs[nruns - 1].len += cs;
+        } else {
+            if (nruns == ROM_RUNS) return false;
+            runs[nruns++] = {pos, cs, sector};
+        }
+    }
+    return true;
+}
+
+bool sd_rom_open(const char *path, uint32_t from, int *pieces) {
+    if (!mounted) return false;
+    Bus b;
+    gf.close();
+    gf = sd.open(path, O_RDONLY);
+    if (!gf) return false;
+    if (!map_runs(from, gf.fileSize())) nruns = 0;  // too fragmented: fall back to seeking
+    *pieces = nruns;
+    return true;
+}
+
+bool sd_rom_read(uint32_t off, void *buf, uint32_t n) {
+    Bus b;
+    uint8_t *dst = (uint8_t *)buf;
+    if ((off | n) & 511) nruns = 0;
+    while (n && nruns) {
+        int i = 0;
+        while (i < nruns && !(off >= runs[i].off && off < runs[i].off + runs[i].len)) i++;
+        if (i == nruns) break;
+        uint32_t k = runs[i].off + runs[i].len - off;
+        if (k > n) k = n;
+        if (!sd.card()->readSectors(runs[i].sector + (off - runs[i].off) / 512, dst, k / 512)) return false;
+        off += k;
+        dst += k;
+        n -= k;
+    }
+    return !n || (gf.seekSet(off) && gf.read(dst, n) == (int)n);
+}
+
+void sd_rom_close(void) {
+    Bus b;
+    gf.close();
+    nruns = 0;
 }
 
 // Only paths inside /PicoGB, without "..", are reachable from the loader.

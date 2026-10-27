@@ -189,7 +189,7 @@ class PicoGB:
         p = self.request("A", bytes([1 if reset else 0]))
         v = struct.unpack("<%dI" % (len(p) // 4), p)
         keys = ["frames", "underruns", "slow_frames", "max_emu_us", "max_frame_us", "avg_emu_us", "stalls",
-                "max_stall_ms", "avg_ppu_us", "avg_apu_us", "dropped_frames"]
+                "max_stall_ms", "avg_ppu_us", "avg_apu_us", "dropped_frames", "page_loads", "max_load_us", "sum_load_us"]
         return dict(zip(keys, v))
 
     def keys(self, mask):

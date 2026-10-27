@@ -8,7 +8,7 @@
 #define DIR_A     LIB_BASE
 #define DIR_B     (LIB_BASE + LIB_SECTOR)
 #define DATA_BASE (LIB_BASE + 2 * LIB_SECTOR)
-#define DIR_MAGIC 0x324C4750u  // "PGL2"
+#define DIR_MAGIC 0x334C4750u  // "PGL3"
 #define BLOCK     0x10000u     // 64 KB erase block
 
 typedef struct {
@@ -57,7 +57,7 @@ static bool dir_valid(const lib_dir_t *d) { return d->magic == DIR_MAGIC && d->c
 static struct {
     bool active, save_area;
     char name[LIB_NAME_LEN];
-    uint32_t off, size, got, stamp, erased_to;
+    uint32_t off, size, full, got, stamp, erased_to;  // size: bytes stored, full: the whole ROM
     uint32_t crc;
     uint8_t sector[LIB_SECTOR];
 } up;  // up.sector doubles as the scratch sector for directory and save writes
@@ -141,7 +141,7 @@ static uint32_t alloc(uint32_t len, uint32_t also_off = 0, uint32_t also_len = 0
         };
         for (int i = 0; i < LIB_MAX_GAMES; i++) {
             if (!dir.e[i].used) continue;
-            check(dir.e[i].rom_off, dir.e[i].rom_len);
+            check(dir.e[i].rom_off, dir.e[i].stored_len);
             check(dir.e[i].save_off, dir.e[i].save_len);
         }
         check(also_off, also_len);
@@ -153,9 +153,11 @@ static uint32_t alloc(uint32_t len, uint32_t also_off = 0, uint32_t also_len = 0
 uint32_t lib_free_bytes(void) {
     uint32_t used = 0;
     for (int i = 0; i < LIB_MAX_GAMES; i++)
-        if (dir.e[i].used) used += round_up(dir.e[i].rom_len) + round_up(dir.e[i].save_len);
+        if (dir.e[i].used) used += round_up(dir.e[i].stored_len) + round_up(dir.e[i].save_len);
     return LIB_END - DATA_BASE - used;
 }
+
+uint32_t lib_capacity(void) { return LIB_END - DATA_BASE; }
 
 // Drops the least recently played cached game (one without a flash save).
 static bool evict_one() {
@@ -173,9 +175,11 @@ bool lib_upload_active(void) { return up.active; }
 uint32_t lib_upload_progress(void) { return up.got; }
 void lib_upload_abort(void) { up.active = false; }
 
-const char *lib_upload_begin(const char *name, uint32_t size, uint32_t stamp, bool save_area, bool evict) {
+const char *lib_upload_begin(const char *name, uint32_t full, uint32_t size, uint32_t stamp, bool save_area,
+                             bool evict) {
     up.active = false;
-    if (size < 0x8000 || size > (8u << 20) || (size & 0x3FFF)) return "not a Game Boy ROM size";
+    if (full < 0x8000 || full > (8u << 20) || (full & 0x3FFF)) return "not a Game Boy ROM size";
+    if (size > full || size < 0x4000 || (size & 0x3FFF)) return "bad stored size";
     if (round_up(size) > LIB_END - DATA_BASE) return "game too big for flash";
     bool evicted = false;
     uint32_t off;
@@ -196,6 +200,7 @@ const char *lib_upload_begin(const char *name, uint32_t size, uint32_t stamp, bo
     up.name[LIB_NAME_LEN - 1] = 0;
     up.off = off;
     up.size = size;
+    up.full = full;
     up.stamp = stamp;
     up.save_area = save_area;
     up.got = 0;
@@ -245,7 +250,7 @@ const char *lib_upload_finish(uint32_t crc, int *index) {
     uint8_t mbc;
     bool battery, rtc;
     uint32_t ram;
-    int err = gb_cart_info(rom, up.size, &mbc, &battery, &rtc, &ram);
+    int err = gb_cart_info(rom, up.full, &mbc, &battery, &rtc, &ram);
     if (err == GB_ERR_CGB_ONLY) return "Game Boy Color only";
     if (err == GB_ERR_MAPPER) return "unsupported cartridge type";
     if (err == GB_ERR_RAM) return "save RAM over 32 KB";
@@ -260,7 +265,8 @@ const char *lib_upload_finish(uint32_t crc, int *index) {
     memcpy(e->name, up.name, LIB_NAME_LEN);
     gb_title(rom, e->title);
     e->rom_off = up.off;
-    e->rom_len = up.size;
+    e->rom_len = up.full;
+    e->stored_len = up.size;
     e->crc = crc;
     e->stamp = up.stamp;
     e->gcsum = rom[0x14E] << 8 | rom[0x14F];

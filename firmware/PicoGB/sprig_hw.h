@@ -21,6 +21,7 @@ enum { BUS_LCD, BUS_SD };
 #define SD_HZ 15700000  // the card fails at 20.8 MHz; 15.6 and 17.9 MHz test clean
 void sprig_bus_take(int who);
 void sprig_bus_give(int who);
+bool sprig_bus_wanted(void);  // the SD card side is waiting: the LCD should let go soon
 void sprig_backlight(bool on);
 // Starts DMA of panel rows [row0, row0 + nrows) from px (LCD_COLS * nrows pixels).
 void sprig_lcd_rows(int row0, int nrows, const uint16_t *px);

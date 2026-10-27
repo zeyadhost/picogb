@@ -11,6 +11,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #define GB_W 160
 #define GB_H 144
@@ -133,6 +134,13 @@ typedef struct gb {
 
     // test ROMs print their results through the serial port
     void (*serial_out)(uint8_t c);
+
+    // Games bigger than the flash: only banks below rom_resident are at `rom`.
+    // For the others rom_page() returns one 4 KB page of a bank (page 0..3),
+    // or null if it isn't in memory and `load` is false. Set both before
+    // gb_init(); with no rom_page the whole ROM is at `rom`.
+    uint16_t rom_resident;
+    const uint8_t *(*rom_page)(struct gb *g, uint32_t bank, uint32_t page, bool load);
 } gb_t;
 
 // Loads a cartridge: rom stays where it is (flash on the Pico); cart_ram must
@@ -150,9 +158,12 @@ void gb_title(const uint8_t *rom, char out[17]);
 
 // Save states are the raw gb_t followed by the cart RAM. After reading one
 // back into a gb_t, restore its pointer fields (rom, rom_bank0, cart_ram, fb,
-// serial_out) and call gb_remap() to rebuild the memory map.
+// serial_out, rom_resident, rom_page) and call gb_remap() to rebuild the
+// memory map. Version 4 states are the same minus the last two fields, so
+// they load by reading GB_STATE_V4_SIZE bytes instead.
 #define GB_STATE_MAGIC 0x53424750u  // "PGBS"
-#define GB_STATE_VERSION 4
+#define GB_STATE_VERSION 5
+#define GB_STATE_V4_SIZE ((offsetof(gb_t, serial_out) + sizeof(void *) + 7) & ~(size_t)7)
 typedef struct {
     uint32_t magic, version, gb_size, ram_size;
     char title[17];
