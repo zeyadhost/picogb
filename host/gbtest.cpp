@@ -12,7 +12,7 @@
 #include <time.h>
 
 static gb_t gb;
-static uint8_t fb[GB_W * GB_H], cart_ram[GB_MAX_CART_RAM];
+static uint8_t fb[GB_W * GB_H] __attribute__((aligned(4))), cart_ram[GB_MAX_CART_RAM];
 static char serial[4096];
 static int serial_n;
 

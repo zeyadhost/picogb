@@ -8,14 +8,15 @@
 #define REG(r) g->io[r]
 enum { SQ1, SQ2, WAVE, NOISE };
 
-static const uint8_t duty_table[4] = {0x01, 0x81, 0x87, 0x7E};  // 12.5, 25, 50, 75 %
+static const uint8_t GB_RAM duty_table[4] = {0x01, 0x81, 0x87, 0x7E};  // 12.5, 25, 50, 75 %
 // Bits that always read back as 1, for 0x10..0x2F.
-static const uint8_t read_mask[0x20] = {
+static const uint8_t GB_RAM read_mask[0x20] = {
     0x80, 0x3F, 0x00, 0xFF, 0xBF, 0xFF, 0x3F, 0x00, 0xFF, 0xBF, 0x7F, 0xFF, 0x9F, 0xFF, 0xBF, 0xFF,
     0xFF, 0x00, 0x00, 0xBF, 0x00, 0x00, 0x70, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 };
 // Register base of each channel's NRx0..NRx4 block.
-static const uint8_t ch_base[4] = {0x10, 0x15, 0x1A, 0x1F};
+static const uint8_t GB_RAM ch_base[4] = {0x10, 0x15, 0x1A, 0x1F};
+static const uint8_t GB_RAM wave_shift[4] = {4, 0, 1, 2};  // NR32 output level: mute, 100, 50, 25 %
 
 void gb_apu_reset(gb_t *g) {
     memset(&A, 0, sizeof A);
@@ -29,7 +30,7 @@ void gb_apu_reset(gb_t *g) {
     A.dac[SQ1] = true;
 }
 
-static int period(gb_t *g, int ch) {
+GB_INLINE int period(gb_t *g, int ch) {
     switch (ch) {
     case SQ1: case SQ2: return (2048 - A.freq[ch]) * 4;
     case WAVE: return (2048 - A.freq[ch]) * 2;
@@ -41,14 +42,14 @@ static int period(gb_t *g, int ch) {
     }
 }
 
-static uint16_t sweep_calc(gb_t *g) {
+GB_INLINE uint16_t sweep_calc(gb_t *g) {
     uint16_t d = A.sweep_shadow >> A.sweep_shift;
     uint16_t f = A.sweep_dir ? A.sweep_shadow - d : A.sweep_shadow + d;
     if (f > 2047) A.on[SQ1] = false;
     return f;
 }
 
-static void trigger(gb_t *g, int ch) {
+static void GB_FAST(trigger)(gb_t *g, int ch) {
     A.on[ch] = A.dac[ch];
     if (A.len[ch] == 0) A.len[ch] = ch == WAVE ? 256 : 64;
     A.timer[ch] = period(g, ch);
@@ -70,7 +71,7 @@ static void trigger(gb_t *g, int ch) {
     }
 }
 
-uint8_t gb_apu_read(gb_t *g, uint8_t reg) {
+uint8_t GB_FAST(gb_apu_read)(gb_t *g, uint8_t reg) {
     if (reg >= 0x30) return REG(reg);  // wave RAM
     if (reg == 0x26)
         return (REG(0x26) & 0x80) | 0x70 | (A.on[SQ1] ? 1 : 0) | (A.on[SQ2] ? 2 : 0) | (A.on[WAVE] ? 4 : 0) |
@@ -78,7 +79,7 @@ uint8_t gb_apu_read(gb_t *g, uint8_t reg) {
     return REG(reg) | read_mask[reg - 0x10];
 }
 
-void gb_apu_write(gb_t *g, uint8_t reg, uint8_t v) {
+void GB_FAST(gb_apu_write)(gb_t *g, uint8_t reg, uint8_t v) {
     if (reg >= 0x30) { REG(reg) = v; return; }
     if (reg == 0x26) {
         if (!(v & 0x80) && (REG(0x26) & 0x80)) {  // power off clears everything
@@ -126,7 +127,7 @@ void gb_apu_write(gb_t *g, uint8_t reg, uint8_t v) {
 }
 
 // 512 Hz frame sequencer: length at 256 Hz, sweep at 128 Hz, envelope at 64 Hz.
-static void sequencer(gb_t *g) {
+static void GB_FAST(sequencer)(gb_t *g) {
     uint8_t s = A.seq_step = (A.seq_step + 1) & 7;
     if (!(s & 1))
         for (int c = 0; c < 4; c++)
@@ -153,7 +154,7 @@ static void sequencer(gb_t *g) {
 }
 
 // Advances a channel by one sample period and returns its level, -15..15.
-static inline int channel(gb_t *g, int c) {
+GB_INLINE int channel(gb_t *g, int c) {
     if (!A.on[c]) return 0;
     int p = period(g, c);
     A.timer[c] -= 128;
@@ -173,8 +174,7 @@ static inline int channel(gb_t *g, int c) {
     case WAVE: {
         uint8_t b = REG(0x30 + (A.wave_pos >> 1));
         int s = (A.wave_pos & 1) ? (b & 15) : (b >> 4);
-        static const uint8_t shift[4] = {4, 0, 1, 2};
-        return ((s * 2 - 15) >> shift[(REG(0x1C) >> 5) & 3]);
+        return ((s * 2 - 15) >> wave_shift[(REG(0x1C) >> 5) & 3]);
     }
     default:
         return (A.lfsr & 1) ? -A.env_vol[c] : A.env_vol[c];

@@ -20,15 +20,25 @@
 #define GB_AUDIO_MAX 1024              // samples buffered per run_frame (a frame is ~549)
 #define GB_MAX_CART_RAM 0x8000
 
+// Everything the running emulator touches must live in RAM. Code or tables
+// left in flash go through the 16 KB XIP cache, which the game's ROM keeps
+// evicting, and every miss stalls the CPU. GB_FAST puts a function in RAM,
+// GB_RAM a table; small helpers are force-inlined into their RAM callers.
 #ifdef ARDUINO
 #include <pico.h>
 #include <hardware/timer.h>
 #define GB_FAST(f) __not_in_flash_func(f)
+#define GB_RAM __not_in_flash("gb")
 #define GB_NOW() time_us_32()
 #else
 #define GB_FAST(f) f
+#define GB_RAM
 #define GB_NOW() 0u
 #endif
+#define GB_INLINE static inline __attribute__((always_inline))
+// Stops GCC from turning copy loops into memcpy/memset calls, which on the
+// Pico go through a stub in flash.
+#define GB_NO_LIBCALLS __attribute__((optimize("no-tree-loop-distribute-patterns")))
 
 // Time spent drawing lines and mixing audio, in microseconds (Pico only).
 extern uint32_t gb_prof_ppu_us, gb_prof_apu_us;
@@ -112,7 +122,7 @@ typedef struct gb {
     uint16_t ppu_next;     // `dot` of the next mode change: call gb_ppu_event() there
     uint8_t ly, mode, win_line;
     bool stat_line, lcd_was_on, win_triggered;
-    uint8_t *fb;           // GB_W x GB_H, format at the top of this file; written line by line
+    uint8_t *fb;           // GB_W x GB_H, 4-byte aligned, format at the top of this file; written line by line
     uint32_t frame;
 
     uint8_t buttons;

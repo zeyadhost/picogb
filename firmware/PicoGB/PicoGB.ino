@@ -29,7 +29,7 @@
 #define UI_H 128
 
 static gb_t gb;
-static uint8_t fbs[2][GB_W * GB_H];
+static uint8_t fbs[2][GB_W * GB_H] __attribute__((aligned(4)));
 static uint8_t back;                    // frame buffer the emulator draws into
 static const uint8_t *last_frame = fbs[1];
 static uint8_t cart_ram[GB_MAX_CART_RAM];
@@ -54,6 +54,8 @@ static int playing_index = -1;
 static uint8_t pc_keys;                 // held keys sent by the loader
 static uint16_t emu_us;
 static I2S i2s(OUTPUT);
+#define FRAME_US 16743      // one Game Boy frame: 70224 cycles at 4.194304 MHz
+#define AUDIO_TARGET 1200   // samples kept queued, about 37 ms of slack for SD card stalls
 static bool audio_on;
 
 // Sound runs only while a game does. Outside a game the I2S clock is stopped,
@@ -1287,10 +1289,32 @@ static void game_step() {
     STAGE(STG_MIRROR);
     if (++mirror_tick & 1) mirror(done, kind, cpal);  // 30 fps to the loader
 
-    // Audio paces the emulator at the Game Boy's real speed: wait until the
-    // I2S buffers have room for this frame's samples, then queue them. There
-    // is a frame's worth of headroom, so the wait is never long.
+    // Frames are paced by the clock at the Game Boy's 59.73 Hz. Waiting for
+    // room in the I2S buffers instead let a frame start only when a whole
+    // 256-sample buffer drained (every 7.8 ms), so about every seventh frame
+    // came 7.8 ms late, a visible hitch. The sound buffer level still nudges
+    // the pace, so the emulator follows the speaker's clock and the buffer
+    // neither runs dry nor overflows.
     STAGE(STG_AUDIO);
+    static uint32_t next_frame;
+    static int32_t fill_err;  // smoothed distance from AUDIO_TARGET, in samples
+    static int audio_cap;     // the most the buffers have ever had free
+    int avail = i2s.availableForWrite() / 4;
+    if (avail > audio_cap) audio_cap = avail;
+    int queued = audio_cap - avail;
+    uint32_t t_now = time_us_32();
+    if (!next_frame || (int32_t)(t_now - next_frame) > 50000) {  // first frame, or after a pause or a stall
+        next_frame = t_now;
+        fill_err = 0;
+        for (int i = queued; i < AUDIO_TARGET - (int)gb.audio_n; i++) i2s.write16(0, 0);
+    } else {
+        fill_err += (queued - AUDIO_TARGET - fill_err) / 8;
+        int32_t adjust = fill_err / 4;  // microseconds: a fuller buffer means we're ahead
+        if (adjust > 1500) adjust = 1500;
+        if (adjust < -1500) adjust = -1500;
+        next_frame += FRAME_US + adjust;
+        while ((int32_t)(time_us_32() - next_frame) < 0) tight_loop_contents();
+    }
     static const uint8_t shift[5] = {16, 4, 3, 2, 1};
     uint32_t deadline = time_us_32() + 40000;
     while (i2s.availableForWrite() / 4 < gb.audio_n && (int32_t)(time_us_32() - deadline) < 0) tight_loop_contents();

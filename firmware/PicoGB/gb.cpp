@@ -12,8 +12,14 @@ enum { IF_VBLANK = 1, IF_STAT = 2, IF_TIMER = 4, IF_SERIAL = 8, IF_JOYPAD = 16 }
 
 // ---------------------------------------------------------------- mapper
 
-static void map_banks(gb_t *g) {
-    uint32_t banks = g->rom_banks;
+// ROM bank numbers wrap at the ROM size. That's a power of two except for a
+// few padded homebrew ROMs, and division is slow (and lives in flash).
+GB_INLINE uint32_t wrap_bank(const gb_t *g, uint32_t b) {
+    uint32_t n = g->rom_banks;
+    return (n & (n - 1)) ? b % n : b & (n - 1);
+}
+
+static void GB_FAST(map_rom)(gb_t *g) {
     uint32_t lo = 0, hi;
     switch (g->mbc) {
     case 1:
@@ -25,36 +31,43 @@ static void map_banks(gb_t *g) {
     case 5: hi = g->rom_bank & 0x1FF; break;
     default: hi = 1;
     }
-    lo %= banks;
-    hi %= banks;
+    lo = wrap_bank(g, lo);
+    hi = wrap_bank(g, hi);
     const uint8_t *b0 = lo == 0 ? g->rom_bank0 : g->rom + lo * 0x4000;
     const uint8_t *b1 = g->rom + hi * 0x4000;
     for (int i = 0; i < 4; i++) {
         g->rd[i] = b0 + i * 0x1000;
         g->rd[4 + i] = b1 + i * 0x1000;
     }
+}
 
-    // Cart RAM: fast reads for plain RAM; writes always take the slow path
-    // so saves know when the RAM changed.
+// Cart RAM: fast reads for plain RAM; writes always take the slow path so
+// saves know when the RAM changed. RAM sizes are powers of two.
+static void GB_FAST(map_ram)(gb_t *g) {
     g->rd[0xA] = g->rd[0xB] = nullptr;
     if (g->ram_en && g->ram_size >= 0x2000 && g->mbc != 2 && !(g->mbc == 3 && g->ram_bank >= 8)) {
-        uint32_t nb = g->ram_size / 0x2000;
+        uint32_t nb = g->ram_size >> 13;
         uint8_t bank = (g->mbc == 1) ? (g->mbc1_mode ? g->bank_hi : 0) : g->ram_bank;
-        uint8_t *p = g->cart_ram + (bank % nb) * 0x2000;
+        uint8_t *p = g->cart_ram + (bank & (nb - 1)) * 0x2000;
         g->rd[0xA] = p;
         g->rd[0xB] = p + 0x1000;
     }
 }
 
-static uint8_t *cart_ram_ptr(gb_t *g, uint16_t a) {
+GB_INLINE void map_banks(gb_t *g) {
+    map_rom(g);
+    map_ram(g);
+}
+
+static uint8_t *GB_FAST(cart_ram_ptr)(gb_t *g, uint16_t a) {
     if (!g->ram_en || g->ram_size == 0) return nullptr;
     if (g->mbc == 2) return g->cart_ram + (a & 0x1FF);
     uint8_t bank = (g->mbc == 1) ? (g->mbc1_mode ? g->bank_hi : 0) : g->ram_bank;
     uint32_t off = (uint32_t)bank * 0x2000 + (a & 0x1FFF);
-    return g->cart_ram + off % g->ram_size;
+    return g->cart_ram + (off & (g->ram_size - 1));
 }
 
-static void rtc_tick(gb_t *g, uint32_t t) {
+static void GB_FAST(rtc_tick)(gb_t *g, uint32_t t) {
     if (!g->has_rtc || (g->rtc[4] & 0x40)) return;  // RTC halt bit: clock stopped
     g->rtc_cycles += t;
     while (g->rtc_cycles >= GB_CLOCK) {
@@ -72,51 +85,73 @@ static void rtc_tick(gb_t *g, uint32_t t) {
     }
 }
 
-static void mbc_write(gb_t *g, uint16_t a, uint8_t v) {
+// Bank switches are frequent (some games switch thousands of times a frame),
+// so only the part of the map a register affects is rebuilt, and only when
+// the value changes.
+static void GB_FAST(mbc_write)(gb_t *g, uint16_t a, uint8_t v) {
     switch (g->mbc) {
     case 1:
-        if (a < 0x2000) g->ram_en = (v & 0x0F) == 0x0A;
-        else if (a < 0x4000) g->rom_bank = v & 0x1F;
-        else if (a < 0x6000) g->bank_hi = v & 3;
-        else g->mbc1_mode = v & 1;
+        if (a < 0x2000) {
+            bool en = (v & 0x0F) == 0x0A;
+            if (en != g->ram_en) { g->ram_en = en; map_ram(g); }
+        } else if (a < 0x4000) {
+            if ((v & 0x1F) != g->rom_bank) { g->rom_bank = v & 0x1F; map_rom(g); }
+        } else if (a < 0x6000) {
+            if ((v & 3) != g->bank_hi) { g->bank_hi = v & 3; map_banks(g); }
+        } else if ((v & 1) != g->mbc1_mode) {
+            g->mbc1_mode = v & 1;
+            map_banks(g);
+        }
         break;
     case 2:
         if (a < 0x4000) {
-            if (a & 0x100) g->rom_bank = v & 0x0F;
-            else g->ram_en = (v & 0x0F) == 0x0A;
+            if (a & 0x100) {
+                if ((v & 0x0F) != g->rom_bank) { g->rom_bank = v & 0x0F; map_rom(g); }
+            } else {
+                g->ram_en = (v & 0x0F) == 0x0A;  // MBC2 RAM is never mapped directly
+            }
         }
         break;
     case 3:
-        if (a < 0x2000) g->ram_en = (v & 0x0F) == 0x0A;
-        else if (a < 0x4000) g->rom_bank = v & 0x7F;
-        else if (a < 0x6000) g->ram_bank = v;
-        else {
-            if (g->rtc_latch == 0 && v == 1) memcpy(g->rtc_latched, g->rtc, 5);
+        if (a < 0x2000) {
+            bool en = (v & 0x0F) == 0x0A;
+            if (en != g->ram_en) { g->ram_en = en; map_ram(g); }
+        } else if (a < 0x4000) {
+            if ((v & 0x7F) != g->rom_bank) { g->rom_bank = v & 0x7F; map_rom(g); }
+        } else if (a < 0x6000) {
+            if (v != g->ram_bank) { g->ram_bank = v; map_ram(g); }
+        } else {
+            if (g->rtc_latch == 0 && v == 1)
+                for (int i = 0; i < 5; i++) g->rtc_latched[i] = g->rtc[i];
             g->rtc_latch = v;
         }
         break;
     case 5:
-        if (a < 0x2000) g->ram_en = (v & 0x0F) == 0x0A;
-        else if (a < 0x3000) g->rom_bank = (g->rom_bank & 0x100) | v;
-        else if (a < 0x4000) g->rom_bank = (g->rom_bank & 0xFF) | (v & 1) << 8;
-        else if (a < 0x6000) g->ram_bank = v & 0x0F;
+        if (a < 0x2000) {
+            bool en = (v & 0x0F) == 0x0A;
+            if (en != g->ram_en) { g->ram_en = en; map_ram(g); }
+        } else if (a < 0x4000) {
+            uint16_t bank = a < 0x3000 ? (g->rom_bank & 0x100) | v : (g->rom_bank & 0xFF) | (v & 1) << 8;
+            if (bank != g->rom_bank) { g->rom_bank = bank; map_rom(g); }
+        } else if (a < 0x6000) {
+            if ((v & 0x0F) != g->ram_bank) { g->ram_bank = v & 0x0F; map_ram(g); }
+        }
         break;
     }
-    map_banks(g);
 }
 
 // ---------------------------------------------------------------- I/O
 
-static uint8_t joypad_read(gb_t *g) {
+GB_INLINE uint8_t joypad_read(gb_t *g) {
     uint8_t sel = g->io[0x00] & 0x30, n = 0x0F;
     if (!(sel & 0x10)) n &= ~(g->buttons & 0x0F);
     if (!(sel & 0x20)) n &= ~(g->buttons >> 4);
     return 0xC0 | sel | n;
 }
 
-static const uint8_t timer_shift[4] = {10, 4, 6, 8};  // TAC rate: 1024, 16, 64, 256 T-cycles
+static const uint8_t GB_RAM timer_shift[4] = {10, 4, 6, 8};  // TAC rate: 1024, 16, 64, 256 T-cycles
 
-static inline void tima_inc(gb_t *g) {
+GB_INLINE void tima_inc(gb_t *g) {
     if (++g->io[0x05] == 0) {
         g->io[0x05] = g->io[0x06];
         IF |= IF_TIMER;
@@ -124,7 +159,7 @@ static inline void tima_inc(gb_t *g) {
 }
 
 // TIMA counts falling edges of one bit of the 16-bit divider.
-static inline void timer_tick(gb_t *g, uint32_t t) {
+GB_INLINE void timer_tick(gb_t *g, uint32_t t) {
     uint32_t old = g->div;
     g->div = (uint16_t)(old + t);
     uint8_t tac = g->io[0x07];
@@ -136,14 +171,14 @@ static inline void timer_tick(gb_t *g, uint32_t t) {
 
 // Runs the timer up to the current memory access within the instruction, so
 // reads and writes of DIV/TIMA/TMA/TAC/IF see the right cycle.
-static inline void timer_sync(gb_t *g) {
+GB_INLINE void timer_sync(gb_t *g) {
     timer_tick(g, g->acc_t - g->synced_t);
     g->synced_t = g->acc_t;
 }
 
 // Work RAM at C000-DFFF (also echoed at E000-FDFF): 4 KB bank 0, then the
 // bank selected by SVBK (always 1 on the original Game Boy).
-static inline uint8_t *wram_ptr(gb_t *g, uint16_t a) {
+GB_INLINE uint8_t *wram_ptr(gb_t *g, uint16_t a) {
     uint16_t off = a & 0x1FFF;
     return off < 0x1000 ? g->wram + off : g->wram + g->wram_bank * 0x1000 + (off - 0x1000);
 }
@@ -186,10 +221,10 @@ static uint8_t GB_FAST(read_slow)(gb_t *g, uint16_t a) {
     return 0xFF;
 }
 
-static inline uint8_t rd8_raw(gb_t *g, uint16_t a);
+GB_INLINE uint8_t rd8_raw(gb_t *g, uint16_t a);
 
 // Copies one 16-byte block from hdma_src to VRAM (current bank).
-static void hdma_block(gb_t *g) {
+static void GB_FAST(hdma_block)(gb_t *g) {
     uint8_t *vram = g->vram + g->vram_bank * 0x2000;
     for (int i = 0; i < 16; i++) vram[(g->hdma_dst + i) & 0x1FFF] = rd8_raw(g, g->hdma_src + i);
     g->hdma_src += 16;
@@ -202,7 +237,7 @@ void GB_FAST(gb_hdma_hblank)(gb_t *g) {
     if (--g->hdma_len == 0) g->hdma_active = false;
 }
 
-static void remap_cgb(gb_t *g) {
+static void GB_FAST(remap_cgb)(gb_t *g) {
     uint8_t *v = g->vram + g->vram_bank * 0x2000;
     g->rd[0x8] = g->wr[0x8] = v;
     g->rd[0x9] = g->wr[0x9] = v + 0x1000;
@@ -210,7 +245,7 @@ static void remap_cgb(gb_t *g) {
 }
 
 // Color-only registers; returns false if r isn't one of them.
-static bool cgb_write(gb_t *g, uint8_t r, uint8_t v) {
+static bool GB_FAST(cgb_write)(gb_t *g, uint8_t r, uint8_t v) {
     switch (r) {
     case 0x4D: g->key1 = v & 1; return true;  // speed switch happens at STOP
     case 0x4F: g->vram_bank = v & 1; remap_cgb(g); return true;
@@ -305,25 +340,25 @@ static void GB_FAST(write_slow)(gb_t *g, uint16_t a, uint8_t v) {
     if (r >= 0x40 && r < 0x4C) { gb_ppu_write(g, r, v); return; }
 }
 
-static inline uint8_t rd8_raw(gb_t *g, uint16_t a) {
+GB_INLINE uint8_t rd8_raw(gb_t *g, uint16_t a) {
     const uint8_t *p = g->rd[a >> 12];
     return p ? p[a & 0xFFF] : read_slow(g, a);
 }
 
 // CPU accesses: each takes one M-cycle, which elapses before the access.
-static inline uint8_t rd8(gb_t *g, uint16_t a) {
+GB_INLINE uint8_t rd8(gb_t *g, uint16_t a) {
     g->acc_t += 4;
     return rd8_raw(g, a);
 }
 
-static inline void wr8(gb_t *g, uint16_t a, uint8_t v) {
+GB_INLINE void wr8(gb_t *g, uint16_t a, uint8_t v) {
     g->acc_t += 4;
     uint8_t *p = g->wr[a >> 12];
     if (p) p[a & 0xFFF] = v;
     else write_slow(g, a, v);
 }
 
-static inline uint16_t rd16(gb_t *g, uint16_t a) { return rd8(g, a) | rd8(g, a + 1) << 8; }
+GB_INLINE uint16_t rd16(gb_t *g, uint16_t a) { return rd8(g, a) | rd8(g, a + 1) << 8; }
 
 // ---------------------------------------------------------------- setup
 
@@ -449,44 +484,44 @@ void gb_set_buttons(gb_t *g, uint8_t pressed) {
 #define SET_HL(v) do { uint16_t _v = (v); g->r[RH] = _v >> 8; g->r[RL] = _v; } while (0)
 #define FLAG(c, bit) ((c) ? (bit) : 0)
 
-static inline uint8_t get_r(gb_t *g, int i) { return i == R_HL ? rd8(g, HL) : g->r[i]; }
-static inline void set_r(gb_t *g, int i, uint8_t v) {
+GB_INLINE uint8_t get_r(gb_t *g, int i) { return i == R_HL ? rd8(g, HL) : g->r[i]; }
+GB_INLINE void set_r(gb_t *g, int i, uint8_t v) {
     if (i == R_HL) wr8(g, HL, v);
     else g->r[i] = v;
 }
 
-static inline uint16_t get_rr(gb_t *g, int i) {  // BC DE HL SP
+GB_INLINE uint16_t get_rr(gb_t *g, int i) {  // BC DE HL SP
     return i == 3 ? g->sp : (uint16_t)(g->r[i * 2] << 8 | g->r[i * 2 + 1]);
 }
-static inline void set_rr(gb_t *g, int i, uint16_t v) {
+GB_INLINE void set_rr(gb_t *g, int i, uint16_t v) {
     if (i == 3) g->sp = v;
     else { g->r[i * 2] = v >> 8; g->r[i * 2 + 1] = v; }
 }
 
-static inline void push(gb_t *g, uint16_t v) {
+GB_INLINE void push(gb_t *g, uint16_t v) {
     g->sp -= 2;
     wr8(g, g->sp + 1, v >> 8);
     wr8(g, g->sp, v);
 }
-static inline uint16_t pop(gb_t *g) {
+GB_INLINE uint16_t pop(gb_t *g) {
     uint16_t v = rd16(g, g->sp);
     g->sp += 2;
     return v;
 }
 
-static inline uint8_t fetch(gb_t *g) {
+GB_INLINE uint8_t fetch(gb_t *g) {
     uint8_t v = rd8(g, g->pc);
     if (g->halt_bug) g->halt_bug = false;  // HALT bug: the byte after HALT is read twice
     else g->pc++;
     return v;
 }
-static inline uint16_t fetch16(gb_t *g) {
+GB_INLINE uint16_t fetch16(gb_t *g) {
     uint16_t v = rd16(g, g->pc);
     g->pc += 2;
     return v;
 }
 
-static inline void alu(gb_t *g, int op, uint8_t v) {
+GB_INLINE void alu(gb_t *g, int op, uint8_t v) {
     uint8_t a = g->r[RA];
     int c = (g->f & FC) ? 1 : 0, res;
     switch (op) {
@@ -517,25 +552,25 @@ static inline void alu(gb_t *g, int op, uint8_t v) {
     }
 }
 
-static inline uint8_t inc8(gb_t *g, uint8_t v) {
+GB_INLINE uint8_t inc8(gb_t *g, uint8_t v) {
     v++;
     g->f = (g->f & FC) | FLAG(v == 0, FZ) | FLAG((v & 0xF) == 0, FH);
     return v;
 }
-static inline uint8_t dec8(gb_t *g, uint8_t v) {
+GB_INLINE uint8_t dec8(gb_t *g, uint8_t v) {
     v--;
     g->f = (g->f & FC) | FN | FLAG(v == 0, FZ) | FLAG((v & 0xF) == 0xF, FH);
     return v;
 }
 
-static inline uint16_t add_sp(gb_t *g, int8_t e) {
+GB_INLINE uint16_t add_sp(gb_t *g, int8_t e) {
     uint16_t sp = g->sp;
     uint8_t u = (uint8_t)e;
     g->f = FLAG((sp & 0xF) + (u & 0xF) > 0xF, FH) | FLAG((sp & 0xFF) + u > 0xFF, FC);
     return sp + e;
 }
 
-static uint8_t cb_op(gb_t *g, uint8_t op, uint8_t v) {
+GB_INLINE uint8_t cb_op(gb_t *g, uint8_t op, uint8_t v) {
     int c = (g->f & FC) ? 1 : 0, out;
     switch (op >> 3) {
     case 0: out = v >> 7; v = v << 1 | out; break;            // RLC
@@ -551,7 +586,7 @@ static uint8_t cb_op(gb_t *g, uint8_t op, uint8_t v) {
     return v;
 }
 
-static inline bool cond(gb_t *g, int cc) {
+GB_INLINE bool cond(gb_t *g, int cc) {
     switch (cc) {
     case 0: return !(g->f & FZ);
     case 1: return g->f & FZ;
@@ -727,7 +762,7 @@ static int GB_FAST(step)(gb_t *g) {
 
 // Everything that runs alongside the CPU. The PPU and APU are only called
 // when their next event is due.
-static inline void tick(gb_t *g, uint32_t t) {
+GB_INLINE void tick(gb_t *g, uint32_t t) {
     timer_tick(g, t - g->synced_t);
     g->acc_t = g->synced_t = 0;
     // double speed only speeds up the CPU and timer; the PPU, APU and frame
@@ -742,7 +777,44 @@ static inline void tick(gb_t *g, uint32_t t) {
     g->cycles += t;
 }
 
-static inline int interrupts(gb_t *g) {
+// HALT with nothing pending: nothing can change until the next PPU mode
+// change, TIMA overflow or, with the LCD off, the end of the frame, so jump
+// straight there. Spinning in HALT used to advance 16 T-cycles at a time and
+// check for events after each step; the jump ends on that same step, and the
+// APU is still advanced in those steps, so the outcome is identical.
+GB_INLINE void halt_tick(gb_t *g) {
+    uint32_t ds = g->double_speed;
+    uint32_t dist = g->dot < g->ppu_next ? (uint32_t)(g->ppu_next - g->dot) << ds : 1;
+    uint8_t tac = g->io[0x07];
+    if (tac & 4) {
+        uint32_t p = 1u << timer_shift[tac & 3];
+        uint32_t ovf = p - (g->div & (p - 1)) + (255u - g->io[0x05]) * p;
+        if (ovf < dist) dist = ovf;
+    }
+    if (!(g->io[0x40] & 0x80)) {
+        uint32_t left = g->cycles < GB_FRAME_CYCLES ? (GB_FRAME_CYCLES - g->cycles) << ds : 1;
+        if (left < dist) dist = left;
+    }
+    uint32_t t = (dist + 15) & ~15u;  // CPU T-cycles, in whole 16-cycle steps
+    timer_tick(g, t);
+
+    uint32_t qs = 4 - ds, q = 1u << qs, n = t >> ds;  // the same in PPU/APU cycles
+    g->dot += n;
+    if (g->dot >= g->ppu_next) gb_ppu_event(g);
+    for (uint32_t left = n; left;) {
+        int32_t due = g->apu.seq_timer < g->apu.sample_timer ? g->apu.seq_timer : g->apu.sample_timer;
+        uint32_t k = due <= 0 ? q : (((uint32_t)due + q - 1) >> qs) << qs;  // to the end of the step it fires in
+        if (k > left) k = left;
+        g->apu.seq_timer -= k;
+        g->apu.sample_timer -= k;
+        left -= k;
+        if (g->apu.sample_timer <= 0 || g->apu.seq_timer <= 0) gb_apu_event(g);
+    }
+    if (g->has_rtc) rtc_tick(g, n);
+    g->cycles += n;
+}
+
+GB_INLINE int interrupts(gb_t *g) {
     uint8_t pending = g->ie & IF & 0x1F;
     if (!pending) return 0;
     g->halted = false;
@@ -762,16 +834,16 @@ void GB_FAST(gb_run_frame)(gb_t *g) {
     g->audio_n = 0;
     while (g->frame == frame) {
         int m = interrupts(g);
-        if (!m) {
-            if (g->halted) {
-                m = 4;  // halted: skip ahead 16 T-cycles at a time until an interrupt
-            } else {
+        if (!m && g->halted) {
+            halt_tick(g);
+        } else {
+            if (!m) {
                 m = step(g);
                 if (g->ei_delay && --g->ei_delay == 0) g->ime = true;
             }
+            tick(g, m * 4);
+            if (g->stall) { uint32_t s = g->stall; g->stall = 0; tick(g, s); }
         }
-        tick(g, m * 4);
-        if (g->stall) { uint32_t s = g->stall; g->stall = 0; tick(g, s); }
         if (g->cycles >= GB_FRAME_CYCLES && !(g->io[0x40] & 0x80)) g->frame++;  // the LCD is off, so end the frame by cycle count
     }
 }
